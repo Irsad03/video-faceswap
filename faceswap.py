@@ -11,7 +11,8 @@ Warum es stabil aussieht (auch beim Essen):
   3. Farbangleichung + weich ausgeblendete Maske -> keine harten Kanten.
   4. Optionaler Enhancer (models/gfpgan.onnx) gegen die 128px-Unschärfe.
 """
-import argparse, os, subprocess, sys, tempfile
+import argparse, glob, os, subprocess, sys, tempfile
+from types import SimpleNamespace
 import cv2
 import numpy as np
 from tqdm import tqdm
@@ -32,15 +33,15 @@ def providers():
 
 
 class Smoother:
-    """Exponentielle Glättung der 5 Gesichts-Keypoints (pro Track, nahe Gesichter = gleiche Person)."""
+    """Exponentielle Glättung (Keypoints oder Winkel) über Frames; große Sprünge werden nicht geglättet."""
     def __init__(self, alpha):
         self.alpha, self.prev = alpha, None
 
-    def __call__(self, kps):
-        if self.prev is not None and np.linalg.norm(kps.mean(0) - self.prev.mean(0)) < 0.5 * np.ptp(kps[:, 0]) * 3:
-            kps = self.alpha * kps + (1 - self.alpha) * self.prev
-        self.prev = kps
-        return kps
+    def __call__(self, x):
+        if self.prev is not None and x.shape == self.prev.shape and np.abs(x - self.prev).max() < 0.5 * max(np.ptp(x), 40):
+            x = self.alpha * x + (1 - self.alpha) * self.prev
+        self.prev = x
+        return x
 
 
 class Swapper:
@@ -53,9 +54,11 @@ class Swapper:
         self.model = insightface.model_zoo.get_model(SWAPPER, providers=prov)
         self.parser = self._sess(PARSER, prov)
         self.enh = self._sess(ENHANCER, prov) if args.enhance else None
-        self.smooth = {}
+        self.smooth, self.pose_smooth = {}, {}
         self.args = args
-        self.source = self._load_source(args.source)
+        self.sources = self._load_sources(args.source)
+        self.last_faces = []
+        self.lost = 0
         if not self.parser:
             print("Hinweis: models/face_parser.onnx fehlt -> keine Okklusions-Maske (Essen/Hände können überdeckt werden).")
 
@@ -66,14 +69,35 @@ class Swapper:
         import onnxruntime as ort
         return ort.InferenceSession(path, providers=prov)
 
-    def _load_source(self, path):
-        img = cv2.imread(path)
-        if img is None:
-            sys.exit(f"Quellbild nicht lesbar: {path}")
-        faces = self.app.get(img)
-        if not faces:
-            sys.exit("Kein Gesicht im Quellbild gefunden.")
-        return max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+    def _load_sources(self, paths):
+        files = []
+        for p in paths:
+            if os.path.isdir(p):
+                files += sorted(f for e in ("jpg", "jpeg", "png", "webp") for f in glob.glob(os.path.join(p, f"*.{e}")))
+            else:
+                files.append(p)
+        srcs = []
+        for path in files:
+            img = cv2.imread(path)
+            faces = self.app.get(img) if img is not None else []
+            if not faces:
+                print(f"Warnung: kein Gesicht in {path} - übersprungen")
+                continue
+            f = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+            srcs.append(f)
+        if not srcs:
+            sys.exit("Kein brauchbares Gesicht in den Quellbildern gefunden.")
+        print(f"{len(srcs)} Quellbild(er) geladen")
+        return srcs
+
+    def _source_for(self, pose):
+        """Identität aus allen Quellbildern, gewichtet nach Ähnlichkeit des Kopfwinkels (pitch, yaw)."""
+        if len(self.sources) == 1:
+            return self.sources[0]
+        d = np.array([np.hypot(f.pose[0] - pose[0], f.pose[1] - pose[1]) for f in self.sources])
+        w = np.exp(-d ** 2 / (2 * 25.0 ** 2)) + 1e-6
+        emb = (np.stack([f.normed_embedding for f in self.sources]) * w[:, None]).sum(0)
+        return SimpleNamespace(normed_embedding=emb / np.linalg.norm(emb))
 
     # --- Hilfsfunktionen -------------------------------------------------------------
     def _occlusion_mask(self, crop512):
@@ -106,17 +130,26 @@ class Swapper:
 
     # --- Hauptlogik ------------------------------------------------------------------
     def process(self, frame):
-        faces = self.app.get(frame)
-        faces = sorted(faces, key=lambda f: f.bbox[0])
+        faces = sorted(self.app.get(frame), key=lambda f: f.bbox[0])
+        if not faces and self.last_faces and self.lost < self.args.hold:
+            faces, self.lost = self.last_faces, self.lost + 1      # kurze Aussetzer überbrücken
+        else:
+            self.lost = 0
+            self.last_faces = faces
         if self.args.only_largest and faces:
             faces = [max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))]
         for i, face in enumerate(faces):
-            face.kps = self.smooth.setdefault(i, Smoother(self.args.smooth))(face.kps.astype(np.float32))
-            frame = self._swap_one(frame, face)
+            sm = self.smooth.setdefault(i, Smoother(self.args.smooth))
+            face.kps = sm(face.kps.astype(np.float32))
+            pose = self.pose_smooth.setdefault(i, Smoother(self.args.smooth))(np.asarray(face.pose, np.float32)[:2])
+            # Extreme Winkel: Swap weich ausblenden statt Fratze zu zeigen (Auto-Fallback)
+            strength = float(np.clip((self.args.max_yaw - abs(pose[1])) / 15.0, 0, 1))
+            if strength > 0:
+                frame = self._swap_one(frame, face, self._source_for(pose), strength)
         return frame
 
-    def _swap_one(self, frame, face):
-        fake, M = self.model.get(frame, face, self.source, paste_back=False)   # 128px Crop + Matrix
+    def _swap_one(self, frame, face, source, strength=1.0):
+        fake, M = self.model.get(frame, face, source, paste_back=False)   # 128px Crop + Matrix
         H, W = frame.shape[:2]
         size = 512
         # Crop-Koordinaten (128) -> 512
@@ -140,20 +173,22 @@ class Swapper:
 
         inv = cv2.invertAffineTransform(M512)
         fake_full = cv2.warpAffine(fake, inv, (W, H), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT)
-        mask_full = cv2.warpAffine(mask, inv, (W, H), flags=cv2.INTER_LINEAR)[..., None]
+        mask_full = cv2.warpAffine(mask, inv, (W, H), flags=cv2.INTER_LINEAR)[..., None] * strength
         out = frame.astype(np.float32) * (1 - mask_full) + fake_full.astype(np.float32) * mask_full
         return out.clip(0, 255).astype(np.uint8)
 
 
 def main():
     p = argparse.ArgumentParser(description="Lokaler Video-Faceswapper")
-    p.add_argument("--source", required=True, help="Bild mit dem Gesicht, das eingesetzt wird")
+    p.add_argument("--source", required=True, nargs="+", help="ein oder mehrere Bilder (oder ein Ordner) der Person, die eingesetzt wird")
     p.add_argument("--target", required=True, help="Zielvideo")
     p.add_argument("--out", default="out.mp4")
     p.add_argument("--smooth", type=float, default=0.6, help="1.0 = keine Glättung, kleiner = stärker (Standard 0.6)")
     p.add_argument("--enhance", action="store_true", help="GFPGAN-Enhancer (models/gfpgan.onnx)")
     p.add_argument("--enhance-blend", type=float, default=0.7)
     p.add_argument("--only-largest", action="store_true", help="nur das größte Gesicht pro Frame tauschen")
+    p.add_argument("--max-yaw", type=float, default=80, help="ab diesem Drehwinkel (Grad) wird der Swap ausgeblendet")
+    p.add_argument("--hold", type=int, default=3, help="Frames, in denen bei Detektionsaussetzern das letzte Gesicht weiterverwendet wird")
     p.add_argument("--crf", type=int, default=16, help="x264-Qualität (kleiner = besser)")
     args = p.parse_args()
 
