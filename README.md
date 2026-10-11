@@ -20,8 +20,10 @@ Modelle (SegFormer + Wan2.1-VACE-1.3B) lädt Hugging Face beim ersten Start (meh
 
 **Regionen:** `upper` (Jacke/Oberteil), `pants`, `dress`, `skirt`, `scarf`, `hat`, `shoes`, `outfit`.
 
+**Körperproportionen:** Arme, Beine, Gesicht und Haare werden per Segmentierung geschützt und nie neu erzeugt. Nur der Kleidungsbereich wird ersetzt, Rest bleibt pixelgenau das Original. Der Prompt wird automatisch um "fitted to the body, same body shape" ergänzt. Ein sehr weites Hemd über einer enganliegenden Jacke bleibt deshalb innerhalb der alten Silhouette.
+
 **Tipps**
 - Prompt auf Englisch, konkret (Farbe, Muster, Stoff).
-- Maske zu knapp/zu weit → `--grow`. Rand flackert → `--smooth 9`.
+- Maske zu knapp → `--grow 8`. Rand flackert → `--smooth 9`.
 - Anderes Ergebnis → `--seed` ändern.
 - Lange Videos werden in Abschnitte zerlegt; jeder knüpft an den vorigen an, damit das Hemd gleich bleibt. Kleine Abweichungen bei sehr schnellen Bewegungen sind möglich.
