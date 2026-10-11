@@ -103,7 +103,7 @@ class Swapper:
     def _occlusion_mask(self, crop512):
         """Gesichts-Maske (0..1, 512x512) aus Face-Parsing; Essen/Hände/Besteck zählen nicht dazu."""
         x = cv2.resize(crop512, (512, 512))[:, :, ::-1].astype(np.float32) / 255.0
-        x = ((x - 0.5) / 0.5).transpose(2, 0, 1)[None]
+        x = ((x - [0.485, 0.456, 0.406]) / [0.229, 0.224, 0.225]).astype(np.float32).transpose(2, 0, 1)[None]  # BiSeNet: ImageNet-Norm
         out = self.parser.run(None, {self.parser.get_inputs()[0].name: x})[0][0]
         m = np.isin(out.argmax(0), FACE_CLASSES).astype(np.float32)
         return cv2.GaussianBlur(m, (0, 0), 3)
