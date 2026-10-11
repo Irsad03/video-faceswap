@@ -23,6 +23,7 @@ PARSER = os.path.join(MODELS, "face_parser.onnx")      # BiSeNet (CelebAMask-HQ,
 ENHANCER = os.path.join(MODELS, "gfpgan.onnx")         # GFPGAN 1.4 (512x512), optional
 
 # CelebAMask-HQ Klassen, die zum Gesicht gehören (Haut, Brauen, Augen, Nase, Mund, Lippen)
+VIDEO_EXT = (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v")
 FACE_CLASSES = [1, 2, 3, 4, 5, 10, 11, 12, 13]
 
 
@@ -73,22 +74,51 @@ class Swapper:
         files = []
         for p in paths:
             if os.path.isdir(p):
-                files += sorted(f for e in ("jpg", "jpeg", "png", "webp") for f in glob.glob(os.path.join(p, f"*.{e}")))
+                files += sorted(f for e in ("jpg", "jpeg", "png", "webp", "mp4", "mov", "mkv", "avi", "webm") for f in glob.glob(os.path.join(p, f"*.{e}")))
             else:
                 files.append(p)
         srcs = []
         for path in files:
+            if path.lower().endswith(VIDEO_EXT):
+                srcs += self._faces_from_video(path)
+                continue
             img = cv2.imread(path)
             faces = self.app.get(img) if img is not None else []
             if not faces:
                 print(f"Warnung: kein Gesicht in {path} - übersprungen")
                 continue
-            f = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-            srcs.append(f)
+            srcs.append(max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1])))
         if not srcs:
             sys.exit("Kein brauchbares Gesicht in den Quellbildern gefunden.")
         print(f"{len(srcs)} Quellbild(er) geladen")
         return srcs
+
+    def _faces_from_video(self, path, step_s=0.25, bin_deg=15, max_n=40):
+        """Quell-Video: Frames abtasten, schlechte aussortieren, pro Winkel-Bereich das beste Gesicht behalten."""
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            print(f"Warnung: Video nicht lesbar: {path}")
+            return []
+        step = max(1, int(round((cap.get(cv2.CAP_PROP_FPS) or 25) * step_s)))
+        best, i = {}, 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if i % step == 0:
+                faces = self.app.get(frame)
+                if len(faces) == 1:                      # nur eindeutige Einzelgesichter
+                    f = faces[0]
+                    sharp = cv2.Laplacian(cv2.cvtColor(frame[max(0, int(f.bbox[1])):int(f.bbox[3]), max(0, int(f.bbox[0])):int(f.bbox[2])], cv2.COLOR_BGR2GRAY), cv2.CV_64F).var() if f.bbox[3] > f.bbox[1] and f.bbox[2] > f.bbox[0] else 0
+                    score = float(f.det_score) * min(sharp, 500.0)
+                    key = (round(f.pose[0] / bin_deg), round(f.pose[1] / bin_deg))
+                    if f.det_score > 0.6 and (key not in best or score > best[key][0]):
+                        best[key] = (score, f)
+            i += 1
+        cap.release()
+        picked = sorted(best.values(), key=lambda t: -t[0])[:max_n]
+        print(f"{path}: {len(picked)} Gesichter aus {len(best)} Winkel-Bereichen übernommen")
+        return [f for _, f in picked]
 
     def _source_for(self, pose):
         """Identität aus allen Quellbildern, gewichtet nach Ähnlichkeit des Kopfwinkels (pitch, yaw)."""
@@ -180,7 +210,7 @@ class Swapper:
 
 def main():
     p = argparse.ArgumentParser(description="Lokaler Video-Faceswapper")
-    p.add_argument("--source", required=True, nargs="+", help="ein oder mehrere Bilder (oder ein Ordner) der Person, die eingesetzt wird")
+    p.add_argument("--source", required=True, nargs="+", help="ein oder mehrere Bilder, Videos oder ein Ordner der Person, die eingesetzt wird")
     p.add_argument("--target", required=True, help="Zielvideo")
     p.add_argument("--out", default="out.mp4")
     p.add_argument("--smooth", type=float, default=0.6, help="1.0 = keine Glättung, kleiner = stärker (Standard 0.6)")

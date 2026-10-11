@@ -22,7 +22,7 @@ Die drei Dateien findest du z. B. in den Model-Assets von FaceFusion/roop bzw. a
 ```bash
 python faceswap.py --source gesicht.jpg --target video.mp4 --out ergebnis.mp4 --enhance
 ```
-Mehrere Bilder (oder ein Ordner) gehen auch: `--source ordner/` bzw. `--source a.jpg b.jpg c.jpg`. Das Tool wählt pro Frame automatisch passend zum Kopfwinkel.
+Als Quelle geht auch ein **Video** der Person (`--source person.mp4`, auch gemischt mit Bildern): Das Tool sucht automatisch die schärfsten Frames pro Kopfwinkel heraus. Mehrere Bilder (oder ein Ordner) gehen auch: `--source ordner/` bzw. `--source a.jpg b.jpg c.jpg`. Das Tool wählt pro Frame automatisch passend zum Kopfwinkel.
 Automatisch: Glättung, Überbrückung kurzer Erkennungsaussetzer (`--hold`), weiches Ausblenden bei extremen Winkeln (`--max-yaw`).
 
 Tipps: `--smooth 0.4` bei zitterndem Gesicht, `--only-largest` bei Hintergrundpersonen, GPU ist ca. 20–50× schneller als CPU.
