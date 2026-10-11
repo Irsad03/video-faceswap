@@ -1,0 +1,5 @@
+models/*.onnx
+models/*.pth
+__pycache__/
+*.mp4
+!examples/*.mp4
