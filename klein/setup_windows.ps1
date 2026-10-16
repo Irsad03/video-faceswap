@@ -7,6 +7,9 @@ $ErrorActionPreference = "Stop"
 New-Item -ItemType Directory -Force -Path $Root, "$Root\hf-cache", "$Root\insightface" | Out-Null
 [Environment]::SetEnvironmentVariable("HF_HOME", "$Root\hf-cache", "User")   # alle HF-Downloads auf D:
 $env:HF_HOME = "$Root\hf-cache"
+$env:PIP_CACHE_DIR = "$Root\pip-cache"                                     # pip-Downloads nicht auf C:
+New-Item -ItemType Directory -Force -Path "$Root\tmp" | Out-Null
+$env:TEMP = "$Root\tmp"; $env:TMP = "$Root\tmp"
 
 # --- ComfyUI (für Teil A: Klein 9B + BFS-LoRA) ---
 if (-not (Test-Path "$Root\ComfyUI")) { git clone https://github.com/comfyanonymous/ComfyUI "$Root\ComfyUI" }
