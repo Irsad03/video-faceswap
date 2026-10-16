@@ -25,6 +25,9 @@ python faceswap.py --source gesicht.jpg --target video.mp4 --out ergebnis.mp4 --
 Als Quelle geht auch ein **Video** der Person (`--source person.mp4`, auch gemischt mit Bildern): Das Tool sucht automatisch die schärfsten Frames pro Kopfwinkel heraus. Mehrere Bilder (oder ein Ordner) gehen auch: `--source ordner/` bzw. `--source a.jpg b.jpg c.jpg`. Das Tool wählt pro Frame automatisch passend zum Kopfwinkel.
 Automatisch: Glättung, Überbrückung kurzer Erkennungsaussetzer (`--hold`), weiches Ausblenden bei extremen Winkeln (`--max-yaw`).
 
+Geschlechtsfilter: Standard ist `--gender female` (nur als weiblich erkannte Personen werden getauscht, alle anderen bleiben unverändert). Mit `--gender any` oder `--gender male` änderst du das. Die Erkennung läuft über mehrere Frames per Mehrheitsentscheid und kann bei Kindern, starken Winkeln oder Verdeckung danebenliegen.
+Ein einziges Quellfoto reicht (am besten scharf und frontal).
+
 Tipps: `--smooth 0.4` bei zitterndem Gesicht, `--only-largest` bei Hintergrundpersonen, GPU ist ca. 20–50× schneller als CPU.
 
 ## Verantwortung

@@ -55,10 +55,10 @@ class Swapper:
         self.model = insightface.model_zoo.get_model(SWAPPER, providers=prov)
         self.parser = self._sess(PARSER, prov)
         self.enh = self._sess(ENHANCER, prov) if args.enhance else None
-        self.smooth, self.pose_smooth = {}, {}
+        self.tracks, self.n = [], 0
         self.args = args
         self.sources = self._load_sources(args.source)
-        self.last_faces = []
+        self.last_jobs = []
         self.lost = 0
         if not self.parser:
             print("Hinweis: models/face_parser.onnx fehlt -> keine Okklusions-Maske (Essen/Hände können überdeckt werden).")
@@ -159,19 +159,53 @@ class Swapper:
         return s.clip(0, 255).astype(np.uint8)
 
     # --- Hauptlogik ------------------------------------------------------------------
+    def _track(self, face):
+        """Gesicht dem nächsten Track der letzten Frames zuordnen (Mittelpunkt-Abstand), sonst neuen Track anlegen."""
+        c = np.array([(face.bbox[0] + face.bbox[2]) / 2, (face.bbox[1] + face.bbox[3]) / 2])
+        w = face.bbox[2] - face.bbox[0]
+        best, bd = None, w * 1.5
+        for t in self.tracks:
+            if t["frame"] != self.n and t["age"] < 15:
+                d = np.linalg.norm(t["c"] - c)
+                if d < bd:
+                    best, bd = t, d
+        if best is None:
+            best = {"kps": Smoother(self.args.smooth), "pose": Smoother(self.args.smooth), "fem": None}
+            self.tracks.append(best)
+        best.update(c=c, frame=self.n, age=0)
+        return best
+
+    def _wanted(self, track, face):
+        """Geschlechtsfilter: Mehrheitsentscheid über mehrere Frames (EMA), damit es nicht hin und her springt."""
+        if self.args.gender == "any":
+            return True
+        fem = 1.0 if face.sex == "F" else 0.0
+        track["fem"] = fem if track["fem"] is None else 0.85 * track["fem"] + 0.15 * fem
+        return track["fem"] >= 0.5 if self.args.gender == "female" else track["fem"] < 0.5
+
     def process(self, frame):
-        faces = sorted(self.app.get(frame), key=lambda f: f.bbox[0])
-        if not faces and self.last_faces and self.lost < self.args.hold:
-            faces, self.lost = self.last_faces, self.lost + 1      # kurze Aussetzer überbrücken
-        else:
-            self.lost = 0
-            self.last_faces = faces
+        self.n += 1
+        for t in self.tracks:
+            t["age"] += 1
+        faces = self.app.get(frame)
         if self.args.only_largest and faces:
             faces = [max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))]
-        for i, face in enumerate(faces):
-            sm = self.smooth.setdefault(i, Smoother(self.args.smooth))
-            face.kps = sm(face.kps.astype(np.float32))
-            pose = self.pose_smooth.setdefault(i, Smoother(self.args.smooth))(np.asarray(face.pose, np.float32)[:2])
+        if faces:
+            self.lost, jobs = 0, []
+            for face in faces:
+                tr = self._track(face)
+                if not self._wanted(tr, face):
+                    continue
+                face.kps = tr["kps"](face.kps.astype(np.float32))
+                pose = tr["pose"](np.asarray(face.pose, np.float32)[:2])
+                jobs.append((face, pose))
+            self.last_jobs = jobs
+        elif self.last_jobs and self.lost < self.args.hold:
+            self.lost += 1                                       # kurze Aussetzer überbrücken
+            jobs = self.last_jobs
+        else:
+            jobs = []
+        for face, pose in jobs:
             # Extreme Winkel: Swap weich ausblenden statt Fratze zu zeigen (Auto-Fallback)
             strength = float(np.clip((self.args.max_yaw - abs(pose[1])) / 15.0, 0, 1))
             if strength > 0:
@@ -216,6 +250,8 @@ def main():
     p.add_argument("--smooth", type=float, default=0.6, help="1.0 = keine Glättung, kleiner = stärker (Standard 0.6)")
     p.add_argument("--enhance", action="store_true", help="GFPGAN-Enhancer (models/gfpgan.onnx)")
     p.add_argument("--enhance-blend", type=float, default=0.7)
+    p.add_argument("--gender", choices=["female", "male", "any"], default="female",
+                   help="welche Personen getauscht werden (Standard: nur weibliche; erkannt per insightface)")
     p.add_argument("--only-largest", action="store_true", help="nur das größte Gesicht pro Frame tauschen")
     p.add_argument("--max-yaw", type=float, default=80, help="ab diesem Drehwinkel (Grad) wird der Swap ausgeblendet")
     p.add_argument("--hold", type=int, default=3, help="Frames, in denen bei Detektionsaussetzern das letzte Gesicht weiterverwendet wird")
