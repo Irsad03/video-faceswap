@@ -1,0 +1,13 @@
+requests
+opencv-python>=4.8
+numpy
+scipy
+pillow
+tqdm
+insightface>=0.7.3
+onnxruntime-gpu
+diffusers>=0.35
+transformers>=4.40
+accelerate
+sentencepiece
+ftfy
